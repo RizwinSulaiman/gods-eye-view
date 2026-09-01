@@ -34,7 +34,7 @@ import {
 import { governorRequestRender } from '../renderGovernor.js';
 
 const RADIO_PREFIX = 'radio:';
-const DIRECTORY_ENDPOINT = '/api/radio/stations';
+const DIRECTORY_ENDPOINT = '/api/radio?route=stations';
 const HORIZON_TICK_MS = 250;
 const HORIZON_CAMERA_MOVE_EPSILON_M = 1;
 const MARKER_LIFT_M = 2.5;
@@ -1760,7 +1760,7 @@ function tryRadioFallback(
 }
 
 function recordDirectoryClick(id) {
-  fetch(`/api/radio/click/${encodeURIComponent(id)}`, { method: 'POST' }).catch(() => {});
+  fetch(`/api/radio?route=click&id=${encodeURIComponent(id)}`, { method: 'POST' }).catch(() => {});
 }
 
 /** Play the selected broadcaster stream after an explicit user action. */

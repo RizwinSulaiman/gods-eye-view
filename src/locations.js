@@ -341,46 +341,93 @@ export function findPoiByName(query) {
 /** Distinguishes an authority veto from a genuine not-found result. */
 export const CANCELLED_SEARCH = Object.freeze({ cancelled: true });
 
+function freeGeocodeTypes(featureCode) {
+  const code = String(featureCode || '').toUpperCase();
+  if (code.startsWith('PCL')) return ['country'];
+  if (code === 'ADM1') return ['administrative_area_level_1'];
+  if (code === 'ADM2') return ['administrative_area_level_2'];
+  if (code.startsWith('ADM')) return ['sublocality'];
+  if (code.startsWith('PPL')) return ['locality'];
+  return ['locality'];
+}
+
+function freeGeocodeViewport(lat, lng, featureCode) {
+  const code = String(featureCode || '').toUpperCase();
+  const latSpan = code.startsWith('PCL') ? 7 : code === 'ADM1' ? 2.5 : code === 'ADM2' ? 0.8 : 0.18;
+  const lonSpan = latSpan * 1.35;
+  return {
+    southwest: { lat: lat - latSpan, lng: lng - lonSpan },
+    northeast: { lat: lat + latSpan, lng: lng + lonSpan },
+  };
+}
+
+async function freeGeocodePlace(query) {
+  const url = new URL('https://geocoding-api.open-meteo.com/v1/search');
+  url.searchParams.set('name', query);
+  url.searchParams.set('count', '5');
+  url.searchParams.set('language', 'en');
+  url.searchParams.set('format', 'json');
+  const response = await fetch(url);
+  if (!response.ok) return null;
+  const hit = (await response.json())?.results?.[0];
+  const lat = Number(hit?.latitude);
+  const lng = Number(hit?.longitude);
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
+  const parts = [hit.name, hit.admin1, hit.country].filter(Boolean);
+  return {
+    formatted_address: [...new Set(parts)].join(', ') || query,
+    types: freeGeocodeTypes(hit.feature_code),
+    geometry: {
+      location: { lat, lng },
+      viewport: freeGeocodeViewport(lat, lng, hit.feature_code),
+    },
+  };
+}
+
 /**
- * Geocode a place name using Google Geocoding API, then fly there at a scale
+ * Geocode a place name using Google when configured, otherwise the free
+ * Open-Meteo global geocoder, then fly there at a scale
  * appropriate to the request. Countries and cities use their viewport by
  * default; precise landmarks/buildings use close landmark framing.
  */
 export async function searchAndFlyTo(viewer, query, options = {}) {
   const apiKey = window.__GOOGLE_MAPS_API_KEY__ || import.meta.env.GOOGLE_MAPS_API_KEY;
-  if (!apiKey) throw new Error('No Google Maps API key available for geocoding');
-
   const beforeFly = typeof options.beforeFly === 'function' ? options.beforeFly : null;
   const mayFly = () => beforeFly === null || beforeFly() !== false;
 
-  // Viewport-biased geocode — the same bias annotationResolver's geocodePlace uses:
-  // "Sixth Street" spoken over Austin must prefer the Sixth Street on screen, not a
-  // same-named road in another city (or the wrong end of town — the W 6th vs E 6th bug).
-  let url = `https://maps.googleapis.com/maps/api/geocode/json?address=${encodeURIComponent(query)}&key=${apiKey}`;
-  const bias = viewportBias(viewer);
-  if (bias) url += `&bounds=${bias}`;
-  const response = await fetch(url);
-  const data = await response.json();
+  let result = null;
+  if (apiKey) {
+    try {
+      let url = `https://maps.googleapis.com/maps/api/geocode/json?address=${encodeURIComponent(query)}&key=${apiKey}`;
+      const bias = viewportBias(viewer);
+      if (bias) url += `&bounds=${bias}`;
+      const response = await fetch(url);
+      const data = await response.json();
+      result = (data.status === 'OK' && data.results?.length) ? data.results[0] : null;
+    } catch {
+      result = null;
+    }
+  }
+  if (!result) result = await freeGeocodePlace(query);
+  if (!result) return null;
 
-  const result = (data.status === 'OK' && data.results?.length) ? data.results[0] : null;
-  let lat = result?.geometry.location.lat;
-  let lng = result?.geometry.location.lng;
-  let label = result ? result.formatted_address : null;
-  let types = result?.types || [];
-  let viewport = result ? (result.geometry.bounds || result.geometry.viewport) : null;
+  let lat = result.geometry.location.lat;
+  let lng = result.geometry.location.lng;
+  let label = result.formatted_address || query;
+  let types = result.types || [];
+  let viewport = result.geometry.bounds || result.geometry.viewport || null;
 
-  // Places-near-view recovery (annotationResolver's twin): a missed geocode, or one
-  // that landed implausibly far from the view centre, snaps back to a view-biased
-  // Places hit within the trust bound — "the Capitol" means the one on screen.
-  const recovered = await placesNearViewRecovery(viewer, query, result ? { lat, lon: lng } : null);
+  // Google's view-biased Places recovery is useful when configured; the
+  // free path stays completely keyless and avoids a dead /api/places call.
+  const recovered = apiKey
+    ? await placesNearViewRecovery(viewer, query, { lat, lon: lng })
+    : null;
   if (recovered) {
     lat = recovered.lat;
     lng = recovered.lon;
-    label = recovered.label || label || query;
-    types = recovered.types || [];
+    label = recovered.label || label;
+    types = recovered.types || types;
     viewport = placesViewportToBounds(recovered.viewport) || viewport;
-  } else if (!result) {
-    return null;
   }
 
   const requestedRange = finitePositive(options.range);
