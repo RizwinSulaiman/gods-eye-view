@@ -62,7 +62,7 @@ export class MapStackController {
     this.cesiumToken = String(cesiumToken || '').trim();
     this._onChange = onChange;
     this._onError = onError;
-    this._activeId = googleTileset ? initialStack : 'osm';
+    this._activeId = googleTileset ? initialStack : (this.cesiumToken ? initialStack : 'osm');
     this._imageryLayer = null;
     this._imageryProviders = new Map();
     this._isSwitching = false;
@@ -89,7 +89,7 @@ export class MapStackController {
     this._switchGen = 0;
 
     if (!this.getStack(this._activeId) || !this.isStackAvailable(this._activeId)) {
-      this._activeId = googleTileset ? 'photoreal' : 'osm';
+      this._activeId = googleTileset ? 'photoreal' : (this.cesiumToken ? 'bing-aerial' : 'osm');
     }
   }
 

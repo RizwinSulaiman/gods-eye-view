@@ -79,15 +79,15 @@ async function init() {
       Cesium.Ion.defaultAccessToken = cesiumToken;
     }
 
-    // Set Google Maps API key for 3D Tiles
-    const googleApiKey = import.meta.env.GOOGLE_MAPS_API_KEY;
-    if (!googleApiKey) {
-      throw new Error('GOOGLE_MAPS_API_KEY not found. Set it as an environment variable.');
+    // Google Photorealistic 3D Tiles are optional. When no Google key is
+    // configured, startup continues on the Cesium globe and uses the ion/OSM
+    // fallback stack below instead of failing the whole application.
+    const googleApiKey = String(import.meta.env.GOOGLE_MAPS_API_KEY || '').trim();
+    if (googleApiKey) {
+      Cesium.GoogleMaps.defaultApiKey = googleApiKey;
+      // locations.js uses this only for Google-backed geocoding features.
+      window.__GOOGLE_MAPS_API_KEY__ = googleApiKey;
     }
-    Cesium.GoogleMaps.defaultApiKey = googleApiKey;
-
-    // Expose API key globally for geocoding in locations.js
-    window.__GOOGLE_MAPS_API_KEY__ = googleApiKey;
 
     // Create the Cesium viewer with minimal chrome
     const viewer = new Cesium.Viewer('cesiumContainer', {
@@ -140,10 +140,10 @@ async function init() {
     // clutter the on-globe attribution line.
     registerDataCredits(viewer);
 
-    // Hide Cesium's default globe — Google Photorealistic 3D Tiles provide their own
-    // globe at all LODs (street level → orbital). The default globe's 2D imagery
-    // clips through 3D tile buildings at close range.
-    viewer.scene.globe.show = false;
+    // Hide the Cesium globe only while a Google-backed startup is possible.
+    // In no-Google deployments the globe must stay visible for Bing/OSM,
+    // Cesium World Terrain, and the OSM Buildings 3D fallback.
+    viewer.scene.globe.show = !googleApiKey;
 
     // Keep a sky behind Google 3D Tiles, but soften Cesium's high-intensity
     // default atmosphere. With the globe hidden its bright limb otherwise
@@ -153,23 +153,37 @@ async function init() {
     viewer.scene.skyAtmosphere.saturationShift = -0.12;
     viewer.scene.skyAtmosphere.brightnessShift = -0.08;
 
-    loaderStatus.textContent = 'Loading Google 3D Tiles...';
+    loaderStatus.textContent = googleApiKey ? 'Loading Google 3D Tiles...' : 'Loading Cesium 3D fallback...';
     let tileset = null;
-    try {
-      // Load Google Photorealistic 3D Tiles
-      tileset = await Cesium.createGooglePhotorealistic3DTileset({
-        onlyUsingWithGoogleGeocoder: true,
-      });
-      viewer.scene.primitives.add(tileset);
-      // NOTE: Cesium World Terrain intentionally disabled — conflicts with Google 3D Tiles at high zoom.
-      // Google Photorealistic 3D Tiles provide their own terrain/elevation.
-      viewer.scene.globe.show = false;
-    } catch (tileError) {
-      console.warn('[Init] Google 3D Tiles unavailable, falling back to Cesium globe:', tileError);
-      const tileErrorDetail = describeError(tileError);
-      loaderStatus.textContent = `Google 3D Tiles unavailable (${tileErrorDetail}). Continuing in fallback mode...`;
-      // Keep Cesium globe visible as fallback instead of aborting the app.
-      viewer.scene.globe.show = true;
+    let fallbackBuildings = null;
+
+    if (googleApiKey) {
+      try {
+        // Load Google Photorealistic 3D Tiles when explicitly configured.
+        tileset = await Cesium.createGooglePhotorealistic3DTileset({
+          onlyUsingWithGoogleGeocoder: true,
+        });
+        viewer.scene.primitives.add(tileset);
+        // Google Photorealistic 3D Tiles provide their own terrain/elevation.
+        viewer.scene.globe.show = false;
+      } catch (tileError) {
+        console.warn('[Init] Google 3D Tiles unavailable, falling back to Cesium globe:', tileError);
+        const tileErrorDetail = describeError(tileError);
+        loaderStatus.textContent = `Google 3D Tiles unavailable (${tileErrorDetail}). Loading Cesium fallback...`;
+        viewer.scene.globe.show = true;
+      }
+    }
+
+    // Free/non-Google 3D fallback: Cesium OSM Buildings is a global 3D Tileset
+    // derived from OpenStreetMap. It overlays the Cesium globe, so Bing/OSM
+    // imagery and terrain remain available beneath the buildings.
+    if (!tileset && cesiumToken) {
+      try {
+        fallbackBuildings = await Cesium.createOsmBuildingsAsync();
+        viewer.scene.primitives.add(fallbackBuildings);
+      } catch (buildingError) {
+        console.warn('[Init] Cesium OSM Buildings unavailable; continuing with terrain/imagery only:', buildingError);
+      }
     }
 
     loaderStatus.textContent = 'Initializing systems...';
@@ -177,7 +191,7 @@ async function init() {
     const mapStackController = new MapStackController(viewer, {
       googleTileset: tileset,
       cesiumToken,
-      initialStack: tileset ? 'photoreal' : 'osm',
+      initialStack: tileset ? 'photoreal' : (cesiumToken ? 'bing-aerial' : 'osm'),
       // Task 5 (height-datum fix): rebroadcast stack changes as a window
       // CustomEvent so data layers (CCTV per-regime ground resolution) can
       // react without coupling MapStackController to layer modules. Fires on
@@ -188,7 +202,7 @@ async function init() {
       },
       onError: (message) => console.warn('[MapStack]', message),
     });
-    await mapStackController.setStack(tileset ? 'photoreal' : 'osm', { silent: true });
+    await mapStackController.setStack(tileset ? 'photoreal' : (cesiumToken ? 'bing-aerial' : 'osm'), { silent: true });
 
     // Initialize the style manager (post-processing, HUD, locations, share links)
     const styleManager = new StyleManager(viewer, { mapStackController });
@@ -246,7 +260,7 @@ async function init() {
     const sceneDirector = new SceneDirector(viewer, styleManager, dataManager);
 
     // Initialize the voice "whiteboard" annotation engine (world-space renderer)
-    const annotations = initAnnotations({ viewer, tileset });
+    const annotations = initAnnotations({ viewer, tileset: tileset || fallbackBuildings });
 
     // Keep startup chrome truthful: a share is not restored until camera,
     // visual/map/panel lanes, and every requested layer have terminated.
@@ -314,7 +328,9 @@ async function init() {
     window.__godsEyeView = {
       viewer,
       styleManager,
-      tileset,
+      tileset: tileset || fallbackBuildings,
+      googleTileset: tileset,
+      fallbackBuildings,
       dataManager,
       sceneDirector,
       mapStackController,
