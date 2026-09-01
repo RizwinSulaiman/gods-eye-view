@@ -153,23 +153,27 @@ async function init() {
     viewer.scene.skyAtmosphere.saturationShift = -0.12;
     viewer.scene.skyAtmosphere.brightnessShift = -0.08;
 
-    loaderStatus.textContent = googleApiKey ? 'Loading Google 3D Tiles...' : 'Loading Cesium 3D fallback...';
+    loaderStatus.textContent = googleApiKey
+      ? 'Loading Google 3D Tiles...'
+      : (cesiumToken ? 'Loading Photorealistic 3D Tiles via Cesium ion...' : 'Loading Cesium 3D fallback...');
     let tileset = null;
     let fallbackBuildings = null;
 
-    if (googleApiKey) {
+    // Cesium ion includes Google Photorealistic 3D Tiles, so an ion token can
+    // load the photoreal layer without a separate Google Cloud API key. A
+    // direct Google key remains supported when configured.
+    if (googleApiKey || cesiumToken) {
       try {
-        // Load Google Photorealistic 3D Tiles when explicitly configured.
-        tileset = await Cesium.createGooglePhotorealistic3DTileset({
-          onlyUsingWithGoogleGeocoder: true,
-        });
+        tileset = googleApiKey
+          ? await Cesium.createGooglePhotorealistic3DTileset({ onlyUsingWithGoogleGeocoder: true })
+          : await Cesium.createGooglePhotorealistic3DTileset();
         viewer.scene.primitives.add(tileset);
-        // Google Photorealistic 3D Tiles provide their own terrain/elevation.
+        // Photorealistic 3D Tiles provide their own surface geometry.
         viewer.scene.globe.show = false;
       } catch (tileError) {
-        console.warn('[Init] Google 3D Tiles unavailable, falling back to Cesium globe:', tileError);
+        console.warn('[Init] Photorealistic 3D Tiles unavailable, falling back to Cesium globe:', tileError);
         const tileErrorDetail = describeError(tileError);
-        loaderStatus.textContent = `Google 3D Tiles unavailable (${tileErrorDetail}). Loading Cesium fallback...`;
+        loaderStatus.textContent = `Photorealistic 3D Tiles unavailable (${tileErrorDetail}). Loading Cesium fallback...`;
         viewer.scene.globe.show = true;
       }
     }
